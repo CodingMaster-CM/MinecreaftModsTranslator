@@ -1,0 +1,1167 @@
+import os
+import sys
+import json
+import re
+import shutil
+import zipfile
+import tempfile
+import requests
+from pathlib import Path
+from urllib.parse import quote
+from tqdm import tqdm
+import platform
+import subprocess
+
+# Try to import TOML parser (Python 3.11+ has tomllib, older needs tomli)
+try:
+    import tomllib as toml
+except ImportError:
+    try:
+        import tomli as toml
+    except ImportError:
+        toml = None
+
+# =========================
+# Translation cache
+# =========================
+translation_cache = {}
+
+# =========================
+# Multi-language terminology (fallback)
+# =========================
+TERMINOLOGY = {
+    "zh_tw": {
+        "Copper": "銅", "Aluminum": "鋁", "Aluminium": "鋁", "Lead": "鉛", "Silver": "銀",
+        "Nickel": "鎳", "Uranium": "鈾", "Constantan": "康銅", "Electrum": "琥珀金", "Steel": "鋼",
+        "Iron": "鐵", "Gold": "金", "Tin": "錫", "Zinc": "鋅", "Brass": "黃銅", "Ingot": "錠",
+        "Ore": "礦", "Block": "方塊", "Plate": "板", "Dust": "粉", "Nugget": "粒", "Stick": "棒",
+        "Rod": "桿", "Tool": "工具", "Machine": "機器", "Generator": "發電機", "Engineer": "工程師",
+        "Workbench": "工作台", "Furnace": "熔爐", "Crucible": "坩堝", "Conveyor": "輸送帶",
+        "Pump": "泵", "Tank": "儲罐", "Silo": "筒倉", "Barrel": "桶", "Bucket": "桶",
+        "Helmet": "頭盔", "Chestplate": "胸甲", "Leggings": "護腿", "Boots": "靴子",
+        "Fluid": "流體", "Item": "物品", "Wire": "電線", "Cable": "電纜", "Pipe": "管",
+        "Manual": "手冊", "Pickaxe": "鎬", "Shovel": "鏟", "Axe": "斧", "Hoe": "鋤", "Sword": "劍"
+    },
+    "zh_cn": {
+        "Copper": "铜", "Aluminum": "铝", "Aluminium": "铝", "Lead": "铅", "Silver": "银",
+        "Nickel": "镍", "Uranium": "铀", "Constantan": "康铜", "Electrum": "琥珀金", "Steel": "钢",
+        "Iron": "铁", "Gold": "金", "Tin": "锡", "Zinc": "锌", "Brass": "黄铜", "Ingot": "锭",
+        "Ore": "矿石", "Block": "方块", "Plate": "板", "Dust": "粉", "Nugget": "粒", "Stick": "棒",
+        "Rod": "杆", "Tool": "工具", "Machine": "机器", "Generator": "发电机", "Engineer": "工程师",
+        "Workbench": "工作台", "Furnace": "熔炉", "Crucible": "坩埚", "Conveyor": "传送带",
+        "Pump": "泵", "Tank": "储罐", "Silo": "筒仓", "Barrel": "桶", "Bucket": "桶",
+        "Helmet": "头盔", "Chestplate": "胸甲", "Leggings": "护腿", "Boots": "靴子",
+        "Fluid": "流体", "Item": "物品", "Wire": "电线", "Cable": "电缆", "Pipe": "管",
+        "Manual": "手册", "Pickaxe": "镐", "Shovel": "铲", "Axe": "斧", "Hoe": "锄", "Sword": "剑"
+    },
+    "ja_jp": {
+        "Copper": "銅", "Aluminum": "アルミニウム", "Lead": "鉛", "Silver": "銀", "Nickel": "ニッケル",
+        "Steel": "鋼", "Iron": "鉄", "Gold": "金", "Ingot": "インゴット", "Ore": "鉱石",
+        "Block": "ブロック", "Tool": "ツール", "Machine": "マシン", "Generator": "発電機",
+        "Workbench": "作業台", "Furnace": "炉", "Pump": "ポンプ", "Tank": "タンク",
+        "Helmet": "ヘルメット", "Chestplate": "チェストプレート", "Leggings": "レギンス", "Boots": "ブーツ",
+        "Item": "アイテム", "Wire": "ワイヤー", "Manual": "マニュアル", "Pickaxe": "ツルハシ",
+        "Shovel": "シャベル", "Axe": "斧", "Hoe": "クワ", "Sword": "剣"
+    },
+    "ko_kr": {
+        "Copper": "구리", "Aluminum": "알루미늄", "Lead": "납", "Silver": "은", "Nickel": "니켈",
+        "Steel": "강철", "Iron": "철", "Gold": "금", "Ingot": "주괴", "Ore": "광석",
+        "Block": "블록", "Tool": "도구", "Machine": "기계", "Generator": "발전기",
+        "Workbench": "작업대", "Furnace": "화로", "Pump": "펌프", "Tank": "탱크",
+        "Helmet": "투구", "Chestplate": "흉갑", "Leggings": "바지", "Boots": "부츠",
+        "Item": "아이템", "Wire": "전선", "Manual": "매뉴얼", "Pickaxe": "곡괭이",
+        "Shovel": "삽", "Axe": "도끼", "Hoe": "괭이", "Sword": "검"
+    },
+    "es_es": {
+        "Copper": "Cobre", "Aluminum": "Aluminio", "Lead": "Plomo", "Silver": "Plata", "Nickel": "Níquel",
+        "Steel": "Acero", "Iron": "Hierro", "Gold": "Oro", "Ingot": "Lingote", "Ore": "Mena",
+        "Block": "Bloque", "Tool": "Herramienta", "Machine": "Máquina", "Generator": "Generador",
+        "Workbench": "Banco de trabajo", "Furnace": "Horno", "Pump": "Bomba", "Tank": "Tanque",
+        "Helmet": "Casco", "Chestplate": "Peto", "Leggings": "Grebas", "Boots": "Botas",
+        "Item": "Objeto", "Manual": "Manual", "Pickaxe": "Pico", "Shovel": "Pala", "Axe": "Hacha",
+        "Hoe": "Azada", "Sword": "Espada"
+    },
+    "ru_ru": {
+        "Copper": "Медь", "Aluminum": "Алюминий", "Lead": "Свинец", "Silver": "Серебро", "Nickel": "Никель",
+        "Steel": "Сталь", "Iron": "Железо", "Gold": "Золото", "Ingot": "Слиток", "Ore": "Руда",
+        "Block": "Блок", "Tool": "Инструмент", "Machine": "Машина", "Generator": "Генератор",
+        "Workbench": "Верстак", "Furnace": "Печь", "Pump": "Насос", "Tank": "Резервуар",
+        "Helmet": "Шлем", "Chestplate": "Нагрудник", "Leggings": "Поножи", "Boots": "Сапоги",
+        "Item": "Предмет", "Wire": "Провод", "Manual": "Руководство", "Pickaxe": "Кирка",
+        "Shovel": "Лопата", "Axe": "Топор", "Hoe": "Мотыга", "Sword": "Меч"
+    }
+}
+
+LANGUAGE_INFO = {
+    "zh_tw": {"name": "繁體中文", "code": "zh_tw", "region": "Taiwan"},
+    "zh_cn": {"name": "简体中文", "code": "zh_cn", "region": "China"},
+    "ja_jp": {"name": "日本語", "code": "ja_jp", "region": "Japan"},
+    "ko_kr": {"name": "한국어", "code": "ko_kr", "region": "Korea"},
+    "es_es": {"name": "Español", "code": "es_es", "region": "Spain"},
+    "ru_ru": {"name": "Русский", "code": "ru_ru", "region": "Russia"},
+    "en_us": {"name": "English (US)", "code": "en_us", "region": "United States"},
+    "de_de": {"name": "Deutsch", "code": "de_de", "region": "Germany"},
+    "fr_fr": {"name": "Français", "code": "fr_fr", "region": "France"},
+    "it_it": {"name": "Italiano", "code": "it_it", "region": "Italy"}
+}
+
+# =========================
+# Full UI translations for ALL UI languages
+# =========================
+UI_STRINGS = {
+    "en_us": {
+        "banner_title": "⚡ Minecraft Mod Language Translator (Translation only) ⚡",
+        "desc": (
+            "This tool:\n"
+            "  • Scans all .jar mods in a folder\n"
+            "  • If target language file is missing, copies en_us.json and translates\n"
+            "  • Creates .backup for every modified jar\n"
+        ),
+        "choose_ui": "🌐 Choose UI language",
+        "choose_target": "🌍 Choose target language file to generate",
+        "choose_range": "❓ Choose (1-{n}, default {d}): ",
+        "choose_invalid": "❌ Invalid input. Please enter a valid number.",
+        "need_packages": "⚠️ Missing Python packages:",
+        "install_confirm": "✅ Install them automatically? (Y/N, default Y): ",
+        "install_fail": "❌ Failed to install packages:",
+        "install_hint": "💡 Manual install: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 Backup option",
+        "backup_keep": "1) Keep all backups (keep)",
+        "backup_delete_success": "2) Delete backups only when success (delete_success)",
+        "backup_delete_all": "3) Always delete backups (delete_all)",
+        "enter_mods_path": "❓ Enter your mods folder path (or type 'help' to show common paths)",
+        "path": "📁 Path: ",
+        "common_paths": "💡 Common mods folder paths:",
+        "path_invalid": "❌ Invalid path (not exist / not folder / no .jar found).",
+        "retry": "🔄 Retry? (Y/N, default Y): ",
+        "confirm_folder": "✅ Process this folder? (Y/N, default Y): ",
+        "scan": "🔍 Scanning mods...",
+        "scan_progress": "Scan",
+        "no_need": "ℹ️ No mods need translation.",
+        "skipped": "⏭️ Skipped",
+        "found_need": "✅ Found {n} mods to translate to {lang}:",
+        "confirm_translate": "❓ Translate all {n} mods to {lang}? (Y/N, default Y): ",
+        "cancel": "❌ Cancelled.",
+        "translate_mod": "[Translate Mod]",
+        "backup_created": "💾 Backup created:",
+        "backup_exists": "⚠️ Backup already exists:",
+        "delete_backup_ok": "✅ Deleted backup:",
+        "delete_backup_fail": "❌ Failed to delete backup:",
+        "no_lang_dir": "No lang directory found",
+        "summary": "📋 Summary",
+        "ok": "✅ Success:",
+        "fail": "❌ Failed:",
+        "folder": "📁 Folder:",
+        "target_lang": "🌍 Target language:",
+        "backup_policy": "💾 Backup policy:",
+        "done": "✅ Done. Thanks!",
+        "press_help_tip": "Tip: On Windows, press Win+R and type %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ Too many requests, using fallback translation:",
+        "trans_err": "⚠️ Translate error:",
+        "deleted_backups": "✅ Deleted backups:"
+    },
+
+    "zh_tw": {
+        "banner_title": "⚡ Minecraft 模組語言檔翻譯工具（只保留翻譯功能）⚡",
+        "desc": (
+            "📌 本工具會：\n"
+            "  • 掃描資料夾內所有 .jar 模組\n"
+            "  • 缺少目標語言檔時，複製 en_us.json 並翻譯\n"
+            "  • 每個被修改的 jar 會建立 .backup\n"
+        ),
+        "choose_ui": "🌐 選擇介面語言",
+        "choose_target": "🌍 選擇要生成的目標語言檔",
+        "choose_range": "❓ 請選擇 (1-{n}，預設 {d}): ",
+        "choose_invalid": "❌ 輸入無效，請輸入有效數字",
+        "need_packages": "⚠️ 缺少 Python 套件：",
+        "install_confirm": "✅ 要自動安裝嗎？(Y/N，預設 Y): ",
+        "install_fail": "❌ 套件安裝失敗：",
+        "install_hint": "💡 手動安裝: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 備份選項",
+        "backup_keep": "1) 保留所有備份 (keep)",
+        "backup_delete_success": "2) 成功後刪除備份 (delete_success)",
+        "backup_delete_all": "3) 完成後總是刪除備份 (delete_all)",
+        "enter_mods_path": "❓ 請輸入 mods 資料夾路徑（或輸入 help 顯示常見路徑）",
+        "path": "📁 路徑: ",
+        "common_paths": "💡 常見 mods 資料夾路徑：",
+        "path_invalid": "❌ 路徑無效（不存在/不是資料夾/找不到 .jar）",
+        "retry": "🔄 要重試嗎？(Y/N，預設 Y): ",
+        "confirm_folder": "✅ 確認處理該資料夾？(Y/N，預設 Y): ",
+        "scan": "🔍 掃描模組中…",
+        "scan_progress": "掃描進度",
+        "no_need": "ℹ️ 沒有需要翻譯的模組！",
+        "skipped": "⏭️ 跳過",
+        "found_need": "✅ 找到 {n} 個需要翻譯成 {lang} 的模組：",
+        "confirm_translate": "❓ 確認翻譯全部 {n} 個模組成 {lang} 嗎？(Y/N，預設 Y): ",
+        "cancel": "❌ 操作已取消",
+        "translate_mod": "【翻譯模組】",
+        "backup_created": "💾 建立備份：",
+        "backup_exists": "⚠️ 備份已存在：",
+        "delete_backup_ok": "✅ 已刪除備份：",
+        "delete_backup_fail": "❌ 刪除備份失敗：",
+        "no_lang_dir": "未找到任何 lang 資料夾",
+        "summary": "📋 處理摘要",
+        "ok": "✅ 成功：",
+        "fail": "❌ 失敗：",
+        "folder": "📁 資料夾：",
+        "target_lang": "🌍 目標語言：",
+        "backup_policy": "💾 備份管理：",
+        "done": "✅ 程式執行完成，謝謝使用！",
+        "press_help_tip": "提示：Windows 可 Win+R 輸入 %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ 請求過於頻繁，使用備用翻譯：",
+        "trans_err": "⚠️ 翻譯錯誤：",
+        "deleted_backups": "✅ 已刪除備份："
+    },
+
+    "zh_cn": {
+        "banner_title": "⚡ Minecraft 模组语言文件翻译工具（仅翻译功能）⚡",
+        "desc": (
+            "📌 本工具会：\n"
+            "  • 扫描文件夹内所有 .jar 模组\n"
+            "  • 缺少目标语言文件时，复制 en_us.json 并翻译\n"
+            "  • 每个被修改的 jar 会创建 .backup\n"
+        ),
+        "choose_ui": "🌐 选择界面语言",
+        "choose_target": "🌍 选择要生成的目标语言文件",
+        "choose_range": "❓ 请选择 (1-{n}，默认 {d}): ",
+        "choose_invalid": "❌ 输入无效，请输入有效数字",
+        "need_packages": "⚠️ 缺少 Python 套件：",
+        "install_confirm": "✅ 要自动安装吗？(Y/N，默认 Y): ",
+        "install_fail": "❌ 安装失败：",
+        "install_hint": "💡 手动安装: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 备份选项",
+        "backup_keep": "1) 保留所有备份 (keep)",
+        "backup_delete_success": "2) 成功后删除备份 (delete_success)",
+        "backup_delete_all": "3) 完成后总是删除备份 (delete_all)",
+        "enter_mods_path": "❓ 请输入 mods 文件夹路径（或输入 help 显示常见路径）",
+        "path": "📁 路径: ",
+        "common_paths": "💡 常见 mods 文件夹路径：",
+        "path_invalid": "❌ 路径无效（不存在/不是文件夹/找不到 .jar）",
+        "retry": "🔄 重试？(Y/N，默认 Y): ",
+        "confirm_folder": "✅ 确认处理该文件夹？(Y/N，默认 Y): ",
+        "scan": "🔍 正在扫描模组…",
+        "scan_progress": "扫描进度",
+        "no_need": "ℹ️ 没有需要翻译的模组！",
+        "skipped": "⏭️ 跳过",
+        "found_need": "✅ 找到 {n} 个需要翻译成 {lang} 的模组：",
+        "confirm_translate": "❓ 确认翻译全部 {n} 个模组成 {lang} 吗？(Y/N，默认 Y): ",
+        "cancel": "❌ 已取消",
+        "translate_mod": "【翻译模组】",
+        "backup_created": "💾 已创建备份：",
+        "backup_exists": "⚠️ 备份已存在：",
+        "delete_backup_ok": "✅ 已删除备份：",
+        "delete_backup_fail": "❌ 删除备份失败：",
+        "no_lang_dir": "未找到任何 lang 文件夹",
+        "summary": "📋 摘要",
+        "ok": "✅ 成功：",
+        "fail": "❌ 失败：",
+        "folder": "📁 文件夹：",
+        "target_lang": "🌍 目标语言：",
+        "backup_policy": "💾 备份策略：",
+        "done": "✅ 程序完成，感谢使用！",
+        "press_help_tip": "提示：Windows 可 Win+R 输入 %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ 请求过于频繁，使用备用翻译：",
+        "trans_err": "⚠️ 翻译错误：",
+        "deleted_backups": "✅ 已删除备份："
+    },
+
+    "ja_jp": {
+        "banner_title": "⚡ Minecraft MOD 言語ファイル翻訳ツール（翻訳のみ）⚡",
+        "desc": (
+            "このツールは：\n"
+            "  • フォルダー内の .jar MOD をスキャン\n"
+            "  • 目的の言語ファイルが無ければ、en_us.json をコピーして翻訳\n"
+            "  • 変更した jar ごとに .backup を作成\n"
+        ),
+        "choose_ui": "🌐 UI 言語を選択",
+        "choose_target": "🌍 生成する目標言語ファイルを選択",
+        "choose_range": "❓ 選択してください (1-{n}、デフォルト {d}): ",
+        "choose_invalid": "❌ 無効な入力です。数字を入力してください。",
+        "need_packages": "⚠️ 必要な Python パッケージが不足しています：",
+        "install_confirm": "✅ 自動でインストールしますか？(Y/N、デフォルト Y): ",
+        "install_fail": "❌ インストールに失敗しました：",
+        "install_hint": "💡 手動: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 バックアップ設定",
+        "backup_keep": "1) すべて保持 (keep)",
+        "backup_delete_success": "2) 成功時のみ削除 (delete_success)",
+        "backup_delete_all": "3) 常に削除 (delete_all)",
+        "enter_mods_path": "❓ mods フォルダーのパスを入力（または help で候補表示）",
+        "path": "📁 パス: ",
+        "common_paths": "💡 よくある mods フォルダー：",
+        "path_invalid": "❌ 無効なパス（存在しない/フォルダーではない/.jar がない）",
+        "retry": "🔄 再入力しますか？(Y/N、デフォルト Y): ",
+        "confirm_folder": "✅ このフォルダーを処理しますか？(Y/N、デフォルト Y): ",
+        "scan": "🔍 MOD をスキャン中…",
+        "scan_progress": "スキャン",
+        "no_need": "ℹ️ 翻訳が必要な MOD はありません。",
+        "skipped": "⏭️ スキップ",
+        "found_need": "✅ {lang} に翻訳が必要な MOD が {n} 個見つかりました：",
+        "confirm_translate": "❓ {n} 個すべてを {lang} に翻訳しますか？(Y/N、デフォルト Y): ",
+        "cancel": "❌ キャンセルしました。",
+        "translate_mod": "【翻訳 MOD】",
+        "backup_created": "💾 バックアップ作成：",
+        "backup_exists": "⚠️ バックアップ既存：",
+        "delete_backup_ok": "✅ バックアップ削除：",
+        "delete_backup_fail": "❌ バックアップ削除失敗：",
+        "no_lang_dir": "lang フォルダーが見つかりません",
+        "summary": "📋 結果",
+        "ok": "✅ 成功：",
+        "fail": "❌ 失敗：",
+        "folder": "📁 フォルダー：",
+        "target_lang": "🌍 目標言語：",
+        "backup_policy": "💾 バックアップ：",
+        "done": "✅ 完了しました。ありがとう！",
+        "press_help_tip": "ヒント：Windows は Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ リクエスト過多。代替翻訳を使用：",
+        "trans_err": "⚠️ 翻訳エラー：",
+        "deleted_backups": "✅ 削除したバックアップ："
+    },
+
+    "ko_kr": {
+        "banner_title": "⚡ Minecraft 모드 언어 파일 번역기(번역 기능만) ⚡",
+        "desc": (
+            "이 도구는:\n"
+            "  • 폴더의 모든 .jar 모드를 스캔\n"
+            "  • 대상 언어 파일이 없으면 en_us.json을 복사 후 번역\n"
+            "  • 수정된 jar마다 .backup 생성\n"
+        ),
+        "choose_ui": "🌐 UI 언어 선택",
+        "choose_target": "🌍 생성할 대상 언어 파일 선택",
+        "choose_range": "❓ 선택 (1-{n}, 기본 {d}): ",
+        "choose_invalid": "❌ 잘못된 입력입니다. 숫자를 입력하세요.",
+        "need_packages": "⚠️ 필요한 Python 패키지가 없습니다:",
+        "install_confirm": "✅ 자동 설치할까요? (Y/N, 기본 Y): ",
+        "install_fail": "❌ 설치 실패:",
+        "install_hint": "💡 수동: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 백업 옵션",
+        "backup_keep": "1) 백업 모두 유지 (keep)",
+        "backup_delete_success": "2) 성공 시에만 삭제 (delete_success)",
+        "backup_delete_all": "3) 항상 삭제 (delete_all)",
+        "enter_mods_path": "❓ mods 폴더 경로 입력(또는 help로 일반 경로 표시)",
+        "path": "📁 경로: ",
+        "common_paths": "💡 일반적인 mods 폴더 경로:",
+        "path_invalid": "❌ 잘못된 경로(없음/폴더 아님/.jar 없음)",
+        "retry": "🔄 다시 시도할까요? (Y/N, 기본 Y): ",
+        "confirm_folder": "✅ 이 폴더를 처리할까요? (Y/N, 기본 Y): ",
+        "scan": "🔍 모드 스캔 중…",
+        "scan_progress": "스캔",
+        "no_need": "ℹ️ 번역이 필요한 모드가 없습니다.",
+        "skipped": "⏭️ 건너뜀",
+        "found_need": "✅ {lang}로 번역할 모드 {n}개 발견:",
+        "confirm_translate": "❓ {n}개 모두 {lang}로 번역할까요? (Y/N, 기본 Y): ",
+        "cancel": "❌ 취소되었습니다.",
+        "translate_mod": "【모드 번역】",
+        "backup_created": "💾 백업 생성:",
+        "backup_exists": "⚠️ 백업이 이미 존재:",
+        "delete_backup_ok": "✅ 백업 삭제:",
+        "delete_backup_fail": "❌ 백업 삭제 실패:",
+        "no_lang_dir": "lang 폴더를 찾을 수 없습니다",
+        "summary": "📋 요약",
+        "ok": "✅ 성공:",
+        "fail": "❌ 실패:",
+        "folder": "📁 폴더:",
+        "target_lang": "🌍 대상 언어:",
+        "backup_policy": "💾 백업 정책:",
+        "done": "✅ 완료. 감사합니다!",
+        "press_help_tip": "팁: Windows는 Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ 요청이 너무 많아 대체 번역 사용:",
+        "trans_err": "⚠️ 번역 오류:",
+        "deleted_backups": "✅ 삭제한 백업:"
+    },
+
+    "es_es": {
+        "banner_title": "⚡ Traductor de archivos de idioma para Mods de Minecraft (solo traducción) ⚡",
+        "desc": (
+            "Esta herramienta:\n"
+            "  • Escanea todos los mods .jar de una carpeta\n"
+            "  • Si falta el idioma objetivo, copia en_us.json y traduce\n"
+            "  • Crea .backup por cada jar modificado\n"
+        ),
+        "choose_ui": "🌐 Elegir idioma de la interfaz",
+        "choose_target": "🌍 Elegir idioma objetivo a generar",
+        "choose_range": "❓ Elige (1-{n}, por defecto {d}): ",
+        "choose_invalid": "❌ Entrada inválida. Introduce un número.",
+        "need_packages": "⚠️ Faltan paquetes de Python:",
+        "install_confirm": "✅ ¿Instalarlos automáticamente? (Y/N, por defecto Y): ",
+        "install_fail": "❌ Error al instalar:",
+        "install_hint": "💡 Manual: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 Opción de copia de seguridad",
+        "backup_keep": "1) Conservar todas las copias (keep)",
+        "backup_delete_success": "2) Borrar solo si tuvo éxito (delete_success)",
+        "backup_delete_all": "3) Borrar siempre (delete_all)",
+        "enter_mods_path": "❓ Introduce la ruta de la carpeta mods (o escribe help para ver rutas comunes)",
+        "path": "📁 Ruta: ",
+        "common_paths": "💡 Rutas comunes de mods:",
+        "path_invalid": "❌ Ruta inválida (no existe/no es carpeta/no hay .jar)",
+        "retry": "🔄 ¿Reintentar? (Y/N, por defecto Y): ",
+        "confirm_folder": "✅ ¿Procesar esta carpeta? (Y/N, por defecto Y): ",
+        "scan": "🔍 Escaneando mods…",
+        "scan_progress": "Escaneo",
+        "no_need": "ℹ️ No hay mods que necesiten traducción.",
+        "skipped": "⏭️ Omitidos",
+        "found_need": "✅ Encontrados {n} mods para traducir a {lang}:",
+        "confirm_translate": "❓ ¿Traducir los {n} mods a {lang}? (Y/N, por defecto Y): ",
+        "cancel": "❌ Cancelado.",
+        "translate_mod": "[Traducir Mod]",
+        "backup_created": "💾 Copia creada:",
+        "backup_exists": "⚠️ Copia ya existe:",
+        "delete_backup_ok": "✅ Copia borrada:",
+        "delete_backup_fail": "❌ No se pudo borrar la copia:",
+        "no_lang_dir": "No se encontró la carpeta lang",
+        "summary": "📋 Resumen",
+        "ok": "✅ Éxito:",
+        "fail": "❌ Fallo:",
+        "folder": "📁 Carpeta:",
+        "target_lang": "🌍 Idioma objetivo:",
+        "backup_policy": "💾 Política de copias:",
+        "done": "✅ Listo. ¡Gracias!",
+        "press_help_tip": "Consejo: En Windows Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ Demasiadas solicitudes, usando traducción alternativa:",
+        "trans_err": "⚠️ Error de traducción:",
+        "deleted_backups": "✅ Copias borradas:"
+    },
+
+    "ru_ru": {
+        "banner_title": "⚡ Переводчик языковых файлов модов Minecraft (только перевод) ⚡",
+        "desc": (
+            "Этот инструмент:\n"
+            "  • Сканирует все .jar моды в папке\n"
+            "  • Если нет целевого языка — копирует en_us.json и переводит\n"
+            "  • Создаёт .backup для каждого изменённого jar\n"
+        ),
+        "choose_ui": "🌐 Выберите язык интерфейса",
+        "choose_target": "🌍 Выберите целевой язык для генерации",
+        "choose_range": "❓ Выберите (1-{n}, по умолчанию {d}): ",
+        "choose_invalid": "❌ Неверный ввод. Введите число.",
+        "need_packages": "⚠️ Не хватает пакетов Python:",
+        "install_confirm": "✅ Установить автоматически? (Y/N, по умолчанию Y): ",
+        "install_fail": "❌ Ошибка установки:",
+        "install_hint": "💡 Вручную: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 Параметры резервных копий",
+        "backup_keep": "1) Сохранять все (keep)",
+        "backup_delete_success": "2) Удалять только при успехе (delete_success)",
+        "backup_delete_all": "3) Всегда удалять (delete_all)",
+        "enter_mods_path": "❓ Введите путь к папке mods (или help для подсказки)",
+        "path": "📁 Путь: ",
+        "common_paths": "💡 Частые пути mods:",
+        "path_invalid": "❌ Неверный путь (нет/не папка/нет .jar)",
+        "retry": "🔄 Повторить? (Y/N, по умолчанию Y): ",
+        "confirm_folder": "✅ Обработать эту папку? (Y/N, по умолчанию Y): ",
+        "scan": "🔍 Сканирование модов…",
+        "scan_progress": "Скан",
+        "no_need": "ℹ️ Модов для перевода нет.",
+        "skipped": "⏭️ Пропущено",
+        "found_need": "✅ Найдено {n} модов для перевода на {lang}:",
+        "confirm_translate": "❓ Перевести все {n} модов на {lang}? (Y/N, по умолчанию Y): ",
+        "cancel": "❌ Отменено.",
+        "translate_mod": "[Перевод мода]",
+        "backup_created": "💾 Бэкап создан:",
+        "backup_exists": "⚠️ Бэкап уже есть:",
+        "delete_backup_ok": "✅ Бэкап удалён:",
+        "delete_backup_fail": "❌ Не удалось удалить бэкап:",
+        "no_lang_dir": "Папка lang не найдена",
+        "summary": "📋 Итоги",
+        "ok": "✅ Успешно:",
+        "fail": "❌ Ошибка:",
+        "folder": "📁 Папка:",
+        "target_lang": "🌍 Целевой язык:",
+        "backup_policy": "💾 Бэкапы:",
+        "done": "✅ Готово. Спасибо!",
+        "press_help_tip": "Подсказка: Windows Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ Слишком много запросов, используется запасной перевод:",
+        "trans_err": "⚠️ Ошибка перевода:",
+        "deleted_backups": "✅ Удалено бэкапов:"
+    },
+
+    "de_de": {
+        "banner_title": "⚡ Minecraft Mod Sprachdatei-Übersetzer (nur Übersetzung) ⚡",
+        "desc": (
+            "Dieses Tool:\n"
+            "  • Scannt alle .jar Mods in einem Ordner\n"
+            "  • Fehlt die Zielsprache, wird en_us.json kopiert und übersetzt\n"
+            "  • Erstellt für jedes geänderte jar ein .backup\n"
+        ),
+        "choose_ui": "🌐 UI-Sprache wählen",
+        "choose_target": "🌍 Zielsprache (Datei) wählen",
+        "choose_range": "❓ Wähle (1-{n}, Standard {d}): ",
+        "choose_invalid": "❌ Ungültige Eingabe. Bitte Zahl eingeben.",
+        "need_packages": "⚠️ Fehlende Python-Pakete:",
+        "install_confirm": "✅ Automatisch installieren? (Y/N, Standard Y): ",
+        "install_fail": "❌ Installation fehlgeschlagen:",
+        "install_hint": "💡 Manuell: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 Backup-Option",
+        "backup_keep": "1) Alle Backups behalten (keep)",
+        "backup_delete_success": "2) Nur bei Erfolg löschen (delete_success)",
+        "backup_delete_all": "3) Immer löschen (delete_all)",
+        "enter_mods_path": "❓ Pfad zum mods-Ordner eingeben (oder help für typische Pfade)",
+        "path": "📁 Pfad: ",
+        "common_paths": "💡 Typische mods-Pfade:",
+        "path_invalid": "❌ Ungültiger Pfad (nicht vorhanden/kein Ordner/keine .jar)",
+        "retry": "🔄 Erneut versuchen? (Y/N, Standard Y): ",
+        "confirm_folder": "✅ Diesen Ordner verarbeiten? (Y/N, Standard Y): ",
+        "scan": "🔍 Scanne Mods…",
+        "scan_progress": "Scan",
+        "no_need": "ℹ️ Keine Mods benötigen eine Übersetzung.",
+        "skipped": "⏭️ Übersprungen",
+        "found_need": "✅ {n} Mods zum Übersetzen nach {lang} gefunden:",
+        "confirm_translate": "❓ Alle {n} Mods nach {lang} übersetzen? (Y/N, Standard Y): ",
+        "cancel": "❌ Abgebrochen.",
+        "translate_mod": "[Mod übersetzen]",
+        "backup_created": "💾 Backup erstellt:",
+        "backup_exists": "⚠️ Backup existiert bereits:",
+        "delete_backup_ok": "✅ Backup gelöscht:",
+        "delete_backup_fail": "❌ Backup konnte nicht gelöscht werden:",
+        "no_lang_dir": "Kein lang-Ordner gefunden",
+        "summary": "📋 Zusammenfassung",
+        "ok": "✅ Erfolgreich:",
+        "fail": "❌ Fehlgeschlagen:",
+        "folder": "📁 Ordner:",
+        "target_lang": "🌍 Zielsprache:",
+        "backup_policy": "💾 Backup-Regel:",
+        "done": "✅ Fertig. Danke!",
+        "press_help_tip": "Tipp: Windows Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ Zu viele Anfragen, Fallback-Übersetzung wird genutzt:",
+        "trans_err": "⚠️ Übersetzungsfehler:",
+        "deleted_backups": "✅ Gelöschte Backups:"
+    },
+
+    "fr_fr": {
+        "banner_title": "⚡ Traducteur de fichiers de langue des mods Minecraft (traduction uniquement) ⚡",
+        "desc": (
+            "Cet outil :\n"
+            "  • Analyse tous les mods .jar d’un dossier\n"
+            "  • Si la langue cible manque, copie en_us.json puis traduit\n"
+            "  • Crée un .backup pour chaque jar modifié\n"
+        ),
+        "choose_ui": "🌐 Choisir la langue de l’interface",
+        "choose_target": "🌍 Choisir la langue cible à générer",
+        "choose_range": "❓ Choisir (1-{n}, par défaut {d}) : ",
+        "choose_invalid": "❌ Entrée invalide. Entrez un nombre.",
+        "need_packages": "⚠️ Paquets Python manquants :",
+        "install_confirm": "✅ Installer automatiquement ? (Y/N, par défaut Y) : ",
+        "install_fail": "❌ Échec de l’installation :",
+        "install_hint": "💡 Manuel : pip install --user requests tqdm tomli",
+        "backup_menu": "💾 Option de sauvegarde",
+        "backup_keep": "1) Conserver toutes les sauvegardes (keep)",
+        "backup_delete_success": "2) Supprimer seulement si succès (delete_success)",
+        "backup_delete_all": "3) Toujours supprimer (delete_all)",
+        "enter_mods_path": "❓ Entrez le chemin du dossier mods (ou help pour afficher des chemins courants)",
+        "path": "📁 Chemin : ",
+        "common_paths": "💡 Chemins mods courants :",
+        "path_invalid": "❌ Chemin invalide (inexistant/pas un dossier/pas de .jar)",
+        "retry": "🔄 Réessayer ? (Y/N, par défaut Y) : ",
+        "confirm_folder": "✅ Traiter ce dossier ? (Y/N, par défaut Y) : ",
+        "scan": "🔍 Analyse des mods…",
+        "scan_progress": "Analyse",
+        "no_need": "ℹ️ Aucun mod n’a besoin de traduction.",
+        "skipped": "⏭️ Ignorés",
+        "found_need": "✅ {n} mods à traduire en {lang} :",
+        "confirm_translate": "❓ Traduire les {n} mods en {lang} ? (Y/N, par défaut Y) : ",
+        "cancel": "❌ Annulé.",
+        "translate_mod": "[Traduire le mod]",
+        "backup_created": "💾 Sauvegarde créée :",
+        "backup_exists": "⚠️ Sauvegarde déjà existante :",
+        "delete_backup_ok": "✅ Sauvegarde supprimée :",
+        "delete_backup_fail": "❌ Impossible de supprimer la sauvegarde :",
+        "no_lang_dir": "Dossier lang introuvable",
+        "summary": "📋 Résumé",
+        "ok": "✅ Réussi :",
+        "fail": "❌ Échec :",
+        "folder": "📁 Dossier :",
+        "target_lang": "🌍 Langue cible :",
+        "backup_policy": "💾 Politique de sauvegarde :",
+        "done": "✅ Terminé. Merci !",
+        "press_help_tip": "Astuce : Windows Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ Trop de requêtes, traduction de secours utilisée :",
+        "trans_err": "⚠️ Erreur de traduction :",
+        "deleted_backups": "✅ Sauvegardes supprimées :"
+    },
+
+    "it_it": {
+        "banner_title": "⚡ Traduttore file lingua per mod di Minecraft (solo traduzione) ⚡",
+        "desc": (
+            "Questo strumento:\n"
+            "  • Scansiona tutti i mod .jar in una cartella\n"
+            "  • Se manca la lingua target, copia en_us.json e traduce\n"
+            "  • Crea un .backup per ogni jar modificato\n"
+        ),
+        "choose_ui": "🌐 Scegli la lingua dell'interfaccia",
+        "choose_target": "🌍 Scegli la lingua target da generare",
+        "choose_range": "❓ Scegli (1-{n}, predefinito {d}): ",
+        "choose_invalid": "❌ Input non valido. Inserisci un numero.",
+        "need_packages": "⚠️ Mancano pacchetti Python:",
+        "install_confirm": "✅ Installarli automaticamente? (Y/N, predefinito Y): ",
+        "install_fail": "❌ Installazione fallita:",
+        "install_hint": "💡 Manuale: pip install --user requests tqdm tomli",
+        "backup_menu": "💾 Opzione backup",
+        "backup_keep": "1) Mantieni tutti i backup (keep)",
+        "backup_delete_success": "2) Elimina solo se successo (delete_success)",
+        "backup_delete_all": "3) Elimina sempre (delete_all)",
+        "enter_mods_path": "❓ Inserisci il percorso della cartella mods (o help per percorsi comuni)",
+        "path": "📁 Percorso: ",
+        "common_paths": "💡 Percorsi mods comuni:",
+        "path_invalid": "❌ Percorso non valido (inesistente/non cartella/nessun .jar)",
+        "retry": "🔄 Riprovare? (Y/N, predefinito Y): ",
+        "confirm_folder": "✅ Elaborare questa cartella? (Y/N, predefinito Y): ",
+        "scan": "🔍 Scansione mod…",
+        "scan_progress": "Scansione",
+        "no_need": "ℹ️ Nessun mod richiede traduzione.",
+        "skipped": "⏭️ Saltati",
+        "found_need": "✅ Trovati {n} mod da tradurre in {lang}:",
+        "confirm_translate": "❓ Tradurre tutti i {n} mod in {lang}? (Y/N, predefinito Y): ",
+        "cancel": "❌ Annullato.",
+        "translate_mod": "[Traduci mod]",
+        "backup_created": "💾 Backup creato:",
+        "backup_exists": "⚠️ Backup già esistente:",
+        "delete_backup_ok": "✅ Backup eliminato:",
+        "delete_backup_fail": "❌ Impossibile eliminare il backup:",
+        "no_lang_dir": "Cartella lang non trovata",
+        "summary": "📋 Riepilogo",
+        "ok": "✅ Successo:",
+        "fail": "❌ Fallito:",
+        "folder": "📁 Cartella:",
+        "target_lang": "🌍 Lingua target:",
+        "backup_policy": "💾 Politica backup:",
+        "done": "✅ Fatto. Grazie!",
+        "press_help_tip": "Suggerimento: Windows Win+R → %appdata%\\.minecraft\\mods",
+        "throttled": "⚠️ Troppe richieste, uso traduzione di fallback:",
+        "trans_err": "⚠️ Errore traduzione:",
+        "deleted_backups": "✅ Backup eliminati:"
+    }
+}
+
+# =========================
+# UI helper
+# =========================
+def ui_get(ui_lang: str, key: str) -> str:
+    return UI_STRINGS.get(ui_lang, UI_STRINGS["en_us"]).get(key, UI_STRINGS["en_us"].get(key, key))
+
+def hr():
+    print("─" * 93)
+
+# =========================
+# Packages
+# =========================
+def install_required_packages(ui_lang: str) -> bool:
+    required_packages = ['requests', 'tqdm']
+    
+    # Check if we need tomli (only for Python < 3.11)
+    if sys.version_info < (3, 11):
+        required_packages.append('tomli')
+
+    installed_packages = []
+
+    try:
+        import importlib
+        for package in required_packages:
+            try:
+                importlib.import_module(package)
+                installed_packages.append(package)
+            except ImportError:
+                pass
+
+        missing_packages = [p for p in required_packages if p not in installed_packages]
+        if missing_packages:
+            print(ui_get(ui_lang, "need_packages"))
+            for package in missing_packages:
+                print(f"   • {package}")
+
+            confirm = input(ui_get(ui_lang, "install_confirm")).strip().lower()
+            if not confirm or confirm in ['y', 'yes']:
+                try:
+                    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user'] + missing_packages)
+                    # Re-import tomli if it was just installed
+                    if 'tomli' in missing_packages:
+                        global toml
+                        import tomli as toml
+                    return True
+                except Exception as e:
+                    print(ui_get(ui_lang, "install_fail"), str(e))
+                    print(ui_get(ui_lang, "install_hint"))
+                    return False
+            return False
+
+        return True
+
+    except Exception as e:
+        print(ui_get(ui_lang, "install_fail"), str(e))
+        return False
+
+# =========================
+# Paths
+# =========================
+def get_common_minecraft_paths():
+    system = platform.system().lower()
+    home_dir = os.path.expanduser("~")
+    paths = []
+    if 'windows' in system:
+        appdata = os.getenv('APPDATA')
+        if appdata:
+            paths.append(os.path.join(appdata, '.minecraft', 'mods'))
+    elif 'darwin' in system:
+        paths.append(os.path.join(home_dir, 'Library', 'Application Support', 'minecraft', 'mods'))
+    elif 'linux' in system:
+        paths.append(os.path.join(home_dir, '.minecraft', 'mods'))
+    return paths
+
+def is_valid_mods_folder(folder_path: str) -> bool:
+    try:
+        if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
+            return False
+        jar_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.jar')]
+        return len(jar_files) > 0
+    except Exception:
+        return False
+
+def get_folder_path_from_user(ui_lang: str) -> str:
+    while True:
+        hr()
+        print(ui_get(ui_lang, "enter_mods_path"))
+        hr()
+        folder_path = input(ui_get(ui_lang, "path")).strip()
+
+        if folder_path.lower() == 'help':
+            print(ui_get(ui_lang, "common_paths"))
+            for i, p in enumerate(get_common_minecraft_paths(), 1):
+                print(f"  {i}. {p}")
+            print(ui_get(ui_lang, "press_help_tip"))
+            continue
+
+        if is_valid_mods_folder(folder_path):
+            jar_count = len([f for f in os.listdir(folder_path) if f.lower().endswith('.jar')])
+            print(f"✅ {jar_count} .jar")
+            return folder_path
+
+        print(ui_get(ui_lang, "path_invalid"))
+        retry = input(ui_get(ui_lang, "retry")).strip().lower()
+        if retry and retry in ['n', 'no']:
+            sys.exit(0)
+
+def confirm_folder_path(ui_lang: str, folder_path: str) -> bool:
+    hr()
+    print(f"{ui_get(ui_lang, 'folder')} {folder_path}")
+    while True:
+        confirm = input(ui_get(ui_lang, "confirm_folder")).strip().lower()
+        if not confirm or confirm in ['y', 'yes']:
+            return True
+        if confirm in ['n', 'no']:
+            return False
+
+# =========================
+# Language selection
+# =========================
+def choose_language(ui_lang: str, title_key: str, default_lang_code: str) -> str:
+    hr()
+    print(ui_get(ui_lang, title_key))
+    hr()
+
+    language_list = list(LANGUAGE_INFO.keys())
+    for i, code in enumerate(language_list, 1):
+        info = LANGUAGE_INFO[code]
+        print(f"  {i}. {info['name']} ({code})")
+
+    default_idx = language_list.index(default_lang_code) + 1 if default_lang_code in language_list else 1
+    while True:
+        raw = input(ui_get(ui_lang, "choose_range").format(n=len(language_list), d=str(default_idx))).strip()
+        if not raw:
+            return default_lang_code if default_lang_code in language_list else language_list[0]
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(language_list):
+                return language_list[idx]
+        except ValueError:
+            pass
+        print(ui_get(ui_lang, "choose_invalid"))
+
+def select_backup_option(ui_lang: str) -> str:
+    hr()
+    print(ui_get(ui_lang, "backup_menu"))
+    hr()
+    print("  " + ui_get(ui_lang, "backup_keep"))
+    print("  " + ui_get(ui_lang, "backup_delete_success"))
+    print("  " + ui_get(ui_lang, "backup_delete_all"))
+    while True:
+        raw = input(ui_get(ui_lang, "choose_range").format(n=3, d="1")).strip()
+        if not raw or raw == "1":
+            return "keep"
+        if raw == "2":
+            return "delete_success"
+        if raw == "3":
+            return "delete_all"
+        print(ui_get(ui_lang, "choose_invalid"))
+
+# =========================
+# Jar operations
+# =========================
+def get_jar_files(folder_path: str):
+    return [Path(os.path.join(folder_path, f)) for f in os.listdir(folder_path) if f.lower().endswith('.jar')]
+
+def create_backup(ui_lang: str, jar_path: Path) -> str:
+    backup_path = str(jar_path) + '.backup'
+    if not os.path.exists(backup_path):
+        print(f"  {ui_get(ui_lang, 'backup_created')} {os.path.basename(backup_path)}")
+        shutil.copy2(jar_path, backup_path)
+    else:
+        print(f"  {ui_get(ui_lang, 'backup_exists')} {os.path.basename(backup_path)}")
+    return backup_path
+
+def delete_backup(ui_lang: str, backup_path: str) -> bool:
+    try:
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+            print(f"  {ui_get(ui_lang, 'delete_backup_ok')} {os.path.basename(backup_path)}")
+            return True
+        return False
+    except Exception as e:
+        print(f"  {ui_get(ui_lang, 'delete_backup_fail')} {str(e)}")
+        return False
+
+def find_lang_directories(root_dir: str):
+    lang_dirs = []
+    for root, dirs, _ in os.walk(root_dir):
+        if 'lang' in dirs:
+            lang_dirs.append(Path(root) / 'lang')
+    return lang_dirs
+
+def repackage_jar(source_dir: str, output_path: str):
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as jar:
+        for root, _, files in os.walk(source_dir):
+            for file in files:
+                file_path = Path(root) / file
+                relative_path = file_path.relative_to(source_dir)
+                if '__MACOSX' in str(relative_path) or '.DS_Store' in str(relative_path):
+                    continue
+                jar.write(file_path, str(relative_path))
+
+# =========================
+# Translation
+# =========================
+def protect_formatting(text):
+    """
+    Replaces Minecraft formatting codes and Python format strings with placeholders
+    to prevent Google Translate from mangling them.
+    """
+    placeholders = {}
+    
+    # Regex for:
+    # 1. Minecraft color codes (e.g., §a, §1)
+    # 2. Python/Java format strings (e.g., %s, %d, %1$s)
+    # 3. Brace format strings (e.g., {0}, {name})
+    pattern = re.compile(r'(§[0-9a-fk-or]|%[0-9]*\$?[sd]|%[sd]|\{[a-zA-Z0-9_]+\})')
+    
+    def replace_match(match):
+        key = f"__FMT{len(placeholders)}__"
+        placeholders[key] = match.group(0)
+        return key
+
+    protected_text = pattern.sub(replace_match, text)
+    return protected_text, placeholders
+
+def restore_formatting(text, placeholders):
+    """
+    Restores the placeholders with original formatting codes.
+    """
+    for key, value in placeholders.items():
+        # Use replace instead of regex to avoid issues if value contains regex chars
+        text = text.replace(key, value)
+        # Also handle cases where Google might have added spaces (e.g., __ FMT0 __)
+        key_spaced = key.replace("__", "__ ") # Just in case, though usually it keeps it
+        # A more robust regex for restoration if needed, but simple replace is safer for now
+    
+    # Fix common Google Translate artifacts on placeholders if they got spaced out
+    # e.g. "__ FMT0 __" -> "__FMT0__"
+    text = re.sub(r'__\s*FMT(\d+)\s*__', r'__FMT\1__', text)
+    
+    for key, value in placeholders.items():
+        text = text.replace(key, value)
+        
+    return text
+
+def google_translate(ui_lang: str, text, source_lang='en', target_lang='zh-TW'):
+    if text is None:
+        return text
+    text = str(text)
+    if not text.strip():
+        return text
+
+    # Protect formatting
+    text_protected, placeholders = protect_formatting(text)
+
+    cache_key = f"{source_lang}:{target_lang}:{text_protected}"
+    if cache_key in translation_cache:
+        return restore_formatting(translation_cache[cache_key], placeholders)
+
+    try:
+        encoded_text = quote(text_protected)
+        url = f'https://translate.googleapis.com/translate_a/single?client=gtx&sl={source_lang}&tl={target_lang}&dt=t&q={encoded_text}'
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+
+        # parse a very simple pattern
+        match = re.search(r'\[\["(.*?)",', r.text)
+        if match:
+            result = match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+            translation_cache[cache_key] = result
+            return restore_formatting(result, placeholders)
+    except Exception as e:
+        if "429" in str(e) or "Too Many Requests" in str(e):
+            print(f"  {ui_get(ui_lang, 'throttled')} {text[:30]}...")
+        else:
+            print(f"  {ui_get(ui_lang, 'trans_err')} {str(e)}")
+
+    # Fallback uses original text, but we should try to preserve formatting there too if possible
+    # But fallback_translation logic is regex based on words.
+    return fallback_translation(text, target_lang.replace("-", "_").lower())
+
+def fallback_translation(text: str, target_lang: str) -> str:
+    if text is None:
+        return text
+    text = str(text)
+    if not text.strip():
+        return text
+
+    # Don't strip color codes completely, just ignore them for matching if possible.
+    # But for simple replacement, we can just iterate.
+    
+    result = text
+
+    if target_lang in TERMINOLOGY:
+        terminology = TERMINOLOGY[target_lang]
+        # Sort keys by length descending to match longest phrases first
+        sorted_keys = sorted(terminology.keys(), key=len, reverse=True)
+        
+        for eng in sorted_keys:
+            trans = terminology[eng]
+            # Use word boundary \b to avoid replacing parts of words (e.g. "Stone" in "Stonebrick")
+            # But we need to be careful about color codes.
+            # Simple regex replacement:
+            result = re.sub(rf'\b{re.escape(eng)}\b', trans, result, flags=re.IGNORECASE)
+
+    if result == text and target_lang != "en_us":
+        # Only add prefix if absolutely no change and it's not just symbols
+        if re.search(r'[a-zA-Z]', text):
+            lang_prefix = LANGUAGE_INFO.get(target_lang, {}).get("name", target_lang)
+            result = f"[{lang_prefix}] {text}"
+
+    return result
+
+def process_lang_directory(ui_lang: str, lang_dir: Path, target_lang: str):
+    lang_info = LANGUAGE_INFO.get(target_lang, LANGUAGE_INFO["zh_tw"])
+    en_us_file = lang_dir / 'en_us.json'
+    target_lang_file = lang_dir / f'{target_lang}.json'
+
+    if target_lang_file.exists():
+        return False, f"exists ({target_lang}.json)"
+    if not en_us_file.exists():
+        return False, "missing en_us.json"
+
+    try:
+        en_data = json.loads(en_us_file.read_text(encoding='utf-8', errors='ignore'))
+
+        target_data = {
+            "language": lang_info['name'],
+            "language.code": lang_info['code'],
+            "language.region": lang_info['region']
+        }
+
+        total = len(en_data)
+        with tqdm(total=total, desc=f"  🌐 {lang_info['name']}", unit="item",
+                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+            for key, value in en_data.items():
+                if key in ["language", "language.code", "language.region"]:
+                    continue
+
+                google_target = target_lang.replace('_', '-') if target_lang != "zh_tw" else "zh-TW"
+                if google_target.lower() == "zh-cn":
+                    google_target = "zh-CN"
+
+                translated = google_translate(ui_lang, value, 'en', google_target)
+                target_data[key] = translated
+                pbar.update(1)
+
+        target_lang_file.write_text(json.dumps(target_data, ensure_ascii=False, indent=2), encoding='utf-8')
+        return True, "ok"
+
+    except Exception as e:
+        return False, f"error: {e}"
+
+def process_single_mod(ui_lang: str, jar_path: Path, target_lang: str):
+    hr()
+    print(f"{ui_get(ui_lang, 'translate_mod')} {jar_path.name}")
+    hr()
+
+    backup_path = create_backup(ui_lang, jar_path)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            with zipfile.ZipFile(jar_path, 'r') as jar:
+                jar.extractall(temp_dir)
+
+            lang_dirs = find_lang_directories(temp_dir)
+            if not lang_dirs:
+                return False, backup_path, ui_get(ui_lang, "no_lang_dir")
+
+            processed_any = False
+            messages = []
+
+            for lang_dir in lang_dirs:
+                result, msg = process_lang_directory(ui_lang, Path(lang_dir), target_lang)
+                if result:
+                    processed_any = True
+                messages.append(f"- {Path(lang_dir).relative_to(temp_dir)}: {msg}")
+
+            if not processed_any:
+                return False, backup_path, "\n".join(messages)
+
+            temp_jar_path = os.path.join(tempfile.gettempdir(), f"temp_{jar_path.name}")
+            repackage_jar(temp_dir, temp_jar_path)
+            shutil.move(temp_jar_path, jar_path)
+            return True, backup_path, "\n".join(messages)
+
+        except Exception as e:
+            return False, backup_path, f"error: {str(e)}"
+
+def scan_mods_for_translation(ui_lang: str, folder_path: str, target_lang: str):
+    jar_files = get_jar_files(folder_path)
+    mods_to_translate = []
+    mods_skipped = []
+
+    print("\n" + ui_get(ui_lang, "scan"))
+
+    for jar_path in tqdm(jar_files, desc=ui_get(ui_lang, "scan_progress"), unit="mod"):
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with zipfile.ZipFile(jar_path, 'r') as jar:
+                    jar.extractall(temp_dir)
+
+                lang_dirs = find_lang_directories(temp_dir)
+                needs_translation = False
+                reasons = []
+
+                for lang_dir in lang_dirs:
+                    target_lang_file = Path(lang_dir) / f'{target_lang}.json'
+                    en_us_file = Path(lang_dir) / 'en_us.json'
+
+                    if target_lang_file.exists():
+                        reasons.append(f"{Path(lang_dir).relative_to(temp_dir)}: exists")
+                    elif not en_us_file.exists():
+                        reasons.append(f"{Path(lang_dir).relative_to(temp_dir)}: missing en_us.json")
+                    else:
+                        needs_translation = True
+
+                if needs_translation:
+                    mods_to_translate.append(jar_path)
+                else:
+                    mods_skipped.append((jar_path, ", ".join(reasons) if reasons else "no lang"))
+
+        except Exception as e:
+            mods_skipped.append((jar_path, f"scan error: {str(e)}"))
+
+    return mods_to_translate, mods_skipped
+
+def process_mods_folder(ui_lang: str, folder_path: str, target_lang: str, backup_option: str):
+    mods_to_translate, mods_skipped = scan_mods_for_translation(ui_lang, folder_path, target_lang)
+
+    if not mods_to_translate:
+        print("\n" + ui_get(ui_lang, "no_need"))
+        if mods_skipped:
+            print(f"{ui_get(ui_lang, 'skipped')}: {len(mods_skipped)}")
+        return 0, 0, []
+
+    lang_name = LANGUAGE_INFO.get(target_lang, LANGUAGE_INFO["zh_tw"])["name"]
+    print("\n" + ui_get(ui_lang, "found_need").format(n=len(mods_to_translate), lang=lang_name))
+    for i, jar_path in enumerate(mods_to_translate[:10], 1):
+        print(f"  {i}. {jar_path.name}")
+    if len(mods_to_translate) > 10:
+        print(f"  ... +{len(mods_to_translate) - 10}")
+
+    confirm = input(ui_get(ui_lang, "confirm_translate").format(n=len(mods_to_translate), lang=lang_name)).strip().lower()
+    if confirm and confirm not in ['y', 'yes']:
+        print(ui_get(ui_lang, "cancel"))
+        return 0, 0, []
+
+    processed_count = 0
+    failed_count = 0
+    backup_info = []
+
+    for i, jar_path in enumerate(mods_to_translate, 1):
+        print(f"\n[{i}/{len(mods_to_translate)}] {jar_path.name}")
+        success, backup_path, message = process_single_mod(ui_lang, jar_path, target_lang)
+        backup_info.append((jar_path, backup_path, success))
+
+        if success:
+            processed_count += 1
+        else:
+            failed_count += 1
+            print(f"  {ui_get(ui_lang, 'fail')} {message}")
+
+    # backup deletion
+    if backup_option != "keep":
+        deleted = 0
+        for _, backup_path, success in backup_info:
+            should_delete = (backup_option == "delete_all") or (backup_option == "delete_success" and success)
+            if should_delete:
+                if delete_backup(ui_lang, backup_path):
+                    deleted += 1
+        print(f"{ui_get(ui_lang, 'deleted_backups')} {deleted}")
+
+    return processed_count, failed_count, backup_info
+
+def print_banner(ui_lang: str):
+    title = ui_get(ui_lang, "banner_title")
+    print("\n" +
+          "╔═══════════════════════════════════════════════════════════════════════════════╗\n" +
+          f"║ {title.center(77)} ║\n" +
+          "╚═══════════════════════════════════════════════════════════════════════════════╝\n")
+    print(ui_get(ui_lang, "desc"))
+
+def main():
+    # 0) UI language first (bootstrap uses English UI strings, but selection list is multilingual names)
+    ui_lang = choose_language("en_us", "choose_ui", default_lang_code="zh_tw")
+
+    # 1) install packages
+    if not install_required_packages(ui_lang):
+        sys.exit(1)
+
+    # 2) banner
+    print_banner(ui_lang)
+
+    # 3) target language (default = UI language)
+    target_lang = choose_language(ui_lang, "choose_target", default_lang_code=ui_lang)
+
+    # 4) backup option
+    backup_option = select_backup_option(ui_lang)
+
+    # 5) folder path
+    folder_path = get_folder_path_from_user(ui_lang)
+    if not confirm_folder_path(ui_lang, folder_path):
+        print(ui_get(ui_lang, "cancel"))
+        sys.exit(0)
+
+    # 6) run
+    try:
+        processed_count, failed_count, _ = process_mods_folder(ui_lang, folder_path, target_lang, backup_option)
+
+        lang_name = LANGUAGE_INFO.get(target_lang, LANGUAGE_INFO["zh_tw"])["name"]
+        hr()
+        print(ui_get(ui_lang, "summary"))
+        hr()
+        print(f"{ui_get(ui_lang,'ok')} {processed_count}")
+        print(f"{ui_get(ui_lang,'fail')} {failed_count}")
+        print(f"{ui_get(ui_lang,'folder')} {folder_path}")
+        print(f"{ui_get(ui_lang,'target_lang')} {lang_name} ({target_lang})")
+        print(f"{ui_get(ui_lang,'backup_policy')} {backup_option}")
+
+    except KeyboardInterrupt:
+        print("\n" + ui_get(ui_lang, "cancel"))
+    except Exception as e:
+        print(f"\n❌ error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n" + ui_get(ui_lang, "done"))
+    print("©coding master.2025/12/26")
+
+if __name__ == "__main__":
+    main()
